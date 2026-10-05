@@ -128,6 +128,10 @@ class PasswordAutofillManager : public autofill::AutofillSuggestionDelegate,
       base::i18n::TextDirection text_direction,
       bool show_password_suggestions);
 
+  // Clears document-specific state, including pending authentication and
+  // confirmation dialogs, when this frame commits a cross-document navigation.
+  void DidNavigateFrame();
+
   // Called when main frame navigates. Not called for in-page navigations.
   void DidNavigateMainFrame();
 

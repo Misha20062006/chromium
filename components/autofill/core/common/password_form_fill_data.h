@@ -123,6 +123,9 @@ struct PasswordFormFillData {
   PasswordFormFillData& operator=(PasswordFormFillData&&);
   ~PasswordFormFillData();
 
+  friend bool operator==(const PasswordFormFillData& lhs,
+                         const PasswordFormFillData& rhs) = default;
+
   // Contains the unique renderer form id.
   // If there is no form tag then |form_renderer_id|.is_null().
   // Username and Password elements renderer ids are in

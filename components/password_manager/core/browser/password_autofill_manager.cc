@@ -568,9 +568,11 @@ void PasswordAutofillManager::OnAddPasswordFillData(
     return;
   }
 
-  // If the `fill_data_` changes, then it's likely that the filling context
-  // changed as well, so the biometric auth is now out of scope.
-  CancelBiometricReauthIfOngoing();
+  // Changed fill data invalidates the pending authentication's filling context.
+  // An identical refresh must not discard the result of an ongoing reauth.
+  if (authenticator_ && (!fill_data_ || *fill_data_ != fill_data)) {
+    CancelBiometricReauthIfOngoing();
+  }
   RequestFavicon(fill_data.url);
 
   // If there are no username or password suggestions, WebAuthn credentials
@@ -735,7 +737,7 @@ bool PasswordAutofillManager::MaybeShowPasswordSuggestionsWithGeneration(
       /*is_for_webauthn_request=*/false);
 }
 
-void PasswordAutofillManager::DidNavigateMainFrame() {
+void PasswordAutofillManager::DidNavigateFrame() {
   fill_data_.reset();
   CancelBiometricReauthIfOngoing();
   favicon_tracker_.TryCancelAll();
@@ -752,6 +754,10 @@ void PasswordAutofillManager::DidNavigateMainFrame() {
   cross_domain_confirmation_controller_.reset();
 #endif
   wait_for_passkeys_timer_.Stop();
+}
+
+void PasswordAutofillManager::DidNavigateMainFrame() {
+  DidNavigateFrame();
 }
 
 base::WeakPtr<PasswordAutofillManager> PasswordAutofillManager::GetWeakPtr() {

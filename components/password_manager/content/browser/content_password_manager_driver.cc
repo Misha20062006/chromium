@@ -116,6 +116,12 @@ void ContentPasswordManagerDriver::BindPendingReceiver(
 }
 
 void ContentPasswordManagerDriver::DidNavigate() {
+  // A driver can outlive its document. Do not carry pending authentication or
+  // confirmation into a new document, even if it sends identical fill data.
+  // The factory resets the primary main frame after processing the navigation.
+  if (!IsInPrimaryMainFrame()) {
+    password_autofill_manager_.DidNavigateFrame();
+  }
   if (!IsRenderFrameHostSupported()) {
     password_manager_receiver_.reset();
   }

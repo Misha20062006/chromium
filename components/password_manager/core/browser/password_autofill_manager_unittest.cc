@@ -1299,6 +1299,53 @@ TEST_F(PasswordAutofillManagerTest, DoesntFillSuggestionIfAuthFailed) {
       SuggestionPosition{.multi_index = {1}});
 }
 
+class PasswordAutofillManagerReauthRefreshTest
+    : public PasswordAutofillManagerTest,
+      public testing::WithParamInterface<bool> {};
+
+TEST_P(PasswordAutofillManagerReauthRefreshTest,
+       IdenticalFillDataPreservesPendingAuthentication) {
+  TestPasswordManagerClient client;
+  NiceMock<MockAutofillClient> autofill_client;
+  fill_data().wait_for_username = true;
+  InitializePasswordAutofillManager(&client, &autofill_client);
+  password_autofill_manager_->ShowSuggestions(kTriggeringField);
+
+  base::OnceCallback<void(bool)> auth_callback;
+  auto authenticator =
+      std::make_unique<device_reauth::MockDeviceAuthenticator>();
+  ON_CALL(*authenticator, Cancel()).WillByDefault([&auth_callback] {
+    auth_callback.Reset();
+  });
+  EXPECT_CALL(*authenticator, Cancel()).Times(0);
+  EXPECT_CALL(*authenticator, AuthenticateWithMessage)
+      .WillOnce(MoveArg<1>(&auth_callback));
+  EXPECT_CALL(client, IsReauthBeforeFillingRequired).WillOnce(Return(true));
+  EXPECT_CALL(client, GetDeviceAuthenticator)
+      .WillOnce(Return(testing::ByMove(std::move(authenticator))));
+  EXPECT_CALL(*client.mock_driver(), FillSuggestion).Times(0);
+
+  password_autofill_manager_->DidAcceptSuggestion(
+      autofill::test::CreateAutofillSuggestion(
+          autofill::SuggestionType::kPasswordEntry, test_username_),
+      SuggestionPosition{.multi_index = {1}});
+
+  // A repeated parse must neither cancel authentication nor fill before it
+  // completes.
+  password_autofill_manager_->OnAddPasswordFillData(fill_data());
+  ASSERT_TRUE(auth_callback);
+  ASSERT_TRUE(testing::Mock::VerifyAndClearExpectations(client.mock_driver()));
+
+  EXPECT_CALL(*client.mock_driver(),
+              FillSuggestion(test_username_, test_password_, _))
+      .Times(GetParam() ? 1 : 0);
+  std::move(auth_callback).Run(GetParam());
+}
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         PasswordAutofillManagerReauthRefreshTest,
+                         testing::Bool());
+
 TEST_F(PasswordAutofillManagerTest, CancelsOngoingBiometricAuthOnDestroy) {
   TestPasswordManagerClient client;
   NiceMock<MockAutofillClient> autofill_client;
@@ -1387,7 +1434,22 @@ TEST_F(PasswordAutofillManagerTest,
   password_autofill_manager_->DeleteFillData();
 }
 
-TEST_F(PasswordAutofillManagerTest,
+enum class FillDataChange {
+  kForm,
+  kUrl,
+  kUsernameField,
+  kPasswordField,
+  kPreferredCredential,
+  kAdditionalCredentials,
+  kWaitForUsername,
+  kBannedFields,
+};
+
+class PasswordAutofillManagerReauthContextTest
+    : public PasswordAutofillManagerTest,
+      public testing::WithParamInterface<FillDataChange> {};
+
+TEST_P(PasswordAutofillManagerReauthContextTest,
        CancelsOngoingBiometricAuthOnFillDataChange) {
   TestPasswordManagerClient client;
   NiceMock<MockAutofillClient> autofill_client;
@@ -1428,9 +1490,147 @@ TEST_F(PasswordAutofillManagerTest,
           autofill::SuggestionType::kPasswordEntry, test_username_),
       SuggestionPosition{.multi_index = {1}});
 
+  autofill::PasswordFormFillData changed_data = fill_data();
+  switch (GetParam()) {
+    case FillDataChange::kForm:
+      changed_data.form_renderer_id = autofill::FormRendererId(1);
+      break;
+    case FillDataChange::kUrl:
+      changed_data.url = GURL("https://other.example/");
+      break;
+    case FillDataChange::kUsernameField:
+      changed_data.username_element_renderer_id = autofill::FieldRendererId(1);
+      break;
+    case FillDataChange::kPasswordField:
+      changed_data.password_element_renderer_id = autofill::FieldRendererId(2);
+      break;
+    case FillDataChange::kPreferredCredential:
+      changed_data.preferred_login.realm = "https://other.example/";
+      break;
+    case FillDataChange::kAdditionalCredentials:
+      changed_data.additional_logins.push_back(changed_data.preferred_login);
+      break;
+    case FillDataChange::kWaitForUsername:
+      changed_data.wait_for_username = true;
+      break;
+    case FillDataChange::kBannedFields:
+      changed_data.suggestion_banned_fields.push_back(
+          autofill::FieldRendererId(2));
+      break;
+  }
+
   EXPECT_CALL(*authenticator_ptr, Cancel());
-  password_autofill_manager_->OnAddPasswordFillData(CreateTestFormFillData());
+  password_autofill_manager_->OnAddPasswordFillData(changed_data);
 }
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         PasswordAutofillManagerReauthContextTest,
+                         testing::Values(FillDataChange::kForm,
+                                         FillDataChange::kUrl,
+                                         FillDataChange::kUsernameField,
+                                         FillDataChange::kPasswordField,
+                                         FillDataChange::kPreferredCredential,
+                                         FillDataChange::kAdditionalCredentials,
+                                         FillDataChange::kWaitForUsername,
+                                         FillDataChange::kBannedFields));
+
+class PasswordAutofillManagerReauthNavigationTest
+    : public PasswordAutofillManagerTest,
+      public testing::WithParamInterface<void (PasswordAutofillManager::*)()> {
+};
+
+TEST_P(PasswordAutofillManagerReauthNavigationTest,
+       CancelsOngoingBiometricAuthOnNavigationAfterIdenticalRefresh) {
+  TestPasswordManagerClient client;
+  NiceMock<MockAutofillClient> autofill_client;
+  InitializePasswordAutofillManager(&client, &autofill_client);
+  password_autofill_manager_->ShowSuggestions(kTriggeringField);
+
+  auto authenticator =
+      std::make_unique<device_reauth::MockDeviceAuthenticator>();
+  bool auth_canceled = false;
+  EXPECT_CALL(*authenticator, AuthenticateWithMessage);
+  EXPECT_CALL(*authenticator, Cancel()).WillOnce([&auth_canceled] {
+    auth_canceled = true;
+  });
+  EXPECT_CALL(client, IsReauthBeforeFillingRequired).WillOnce(Return(true));
+  EXPECT_CALL(client, GetDeviceAuthenticator)
+      .WillOnce(Return(testing::ByMove(std::move(authenticator))));
+  EXPECT_CALL(*client.mock_driver(), FillSuggestion).Times(0);
+
+  password_autofill_manager_->DidAcceptSuggestion(
+      autofill::test::CreateAutofillSuggestion(
+          autofill::SuggestionType::kPasswordEntry, test_username_),
+      SuggestionPosition{.multi_index = {1}});
+  password_autofill_manager_->OnAddPasswordFillData(fill_data());
+  ASSERT_FALSE(auth_canceled);
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
+  ASSERT_NE(password_autofill_manager_->manual_fallback_flow(), nullptr);
+#endif
+
+  (password_autofill_manager_.get()->*GetParam())();
+  EXPECT_TRUE(auth_canceled);
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
+  EXPECT_EQ(password_autofill_manager_->manual_fallback_flow(), nullptr);
+#endif
+  password_autofill_manager_.reset();
+}
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS) || \
+    BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
+TEST_P(PasswordAutofillManagerReauthNavigationTest,
+       DestroysPendingCrossDomainConfirmationOnNavigation) {
+  class TestConfirmationController
+      : public PasswordCrossDomainConfirmationPopupController {
+   public:
+    explicit TestConfirmationController(base::OnceClosure confirmation_callback)
+        : confirmation_callback_(std::move(confirmation_callback)) {}
+
+    base::WeakPtr<TestConfirmationController> GetWeakPtr() {
+      return weak_ptr_factory_.GetWeakPtr();
+    }
+
+   private:
+    base::OnceClosure confirmation_callback_;
+    base::WeakPtrFactory<TestConfirmationController> weak_ptr_factory_{this};
+  };
+
+  TestPasswordManagerClient client;
+  NiceMock<MockAutofillClient> autofill_client;
+  fill_data().preferred_login.is_grouped_affiliation = true;
+  fill_data().preferred_login.realm = "https://other.example/";
+  InitializePasswordAutofillManager(&client, &autofill_client);
+
+  base::WeakPtr<TestConfirmationController> confirmation_controller;
+  EXPECT_CALL(client, ShowCrossDomainConfirmationPopup)
+      .WillOnce([&confirmation_controller](Unused, Unused, Unused, Unused,
+                                           Unused, base::OnceClosure callback) {
+        auto controller =
+            std::make_unique<TestConfirmationController>(std::move(callback));
+        confirmation_controller = controller->GetWeakPtr();
+        return controller;
+      });
+  EXPECT_CALL(client, GetDeviceAuthenticator).Times(0);
+  EXPECT_CALL(*client.mock_driver(), FillSuggestion).Times(0);
+
+  password_autofill_manager_->DidAcceptSuggestion(
+      autofill::test::CreateAutofillSuggestion(
+          autofill::SuggestionType::kPasswordEntry, test_username_),
+      SuggestionPosition{.multi_index = {0}});
+  ASSERT_TRUE(confirmation_controller);
+
+  (password_autofill_manager_.get()->*GetParam())();
+  EXPECT_FALSE(confirmation_controller);
+  password_autofill_manager_.reset();
+}
+#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS) ||
+        // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    PasswordAutofillManagerReauthNavigationTest,
+    testing::Values(&PasswordAutofillManager::DidNavigateFrame,
+                    &PasswordAutofillManager::DidNavigateMainFrame));
 
 TEST_F(PasswordAutofillManagerTest, CancelsOngoingBiometricAuthOnNewRequest) {
   TestPasswordManagerClient client;

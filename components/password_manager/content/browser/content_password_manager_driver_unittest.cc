@@ -337,6 +337,21 @@ TEST_F(ContentPasswordManagerDriverTest, ClearPasswordsOnAutofill) {
   base::RunLoop().RunUntilIdle();
 }
 
+TEST_F(ContentPasswordManagerDriverTest, ClearsFillDataOnSubframeNavigation) {
+  content::RenderFrameHost* subframe =
+      content::RenderFrameHostTester::For(main_rfh())->AppendChild("child");
+  ContentPasswordManagerDriver driver(subframe, &password_manager_client_);
+  PasswordAutofillManager* manager = driver.GetPasswordAutofillManager();
+  const PasswordFormFillData fill_data = GetTestPasswordFormFillData();
+  manager->OnAddPasswordFillData(fill_data);
+
+  // A reused subframe driver must discard data from the previous document.
+  driver.DidNavigate();
+
+  EXPECT_FALSE(manager->PreviewSuggestionForTest(
+      fill_data.preferred_login.username_value));
+}
+
 TEST_F(ContentPasswordManagerDriverTest, SetFrameAndFormMetaDataOfForm) {
   NavigateAndCommit(GURL("https://username:password@hostname/path?query#hash"));
 
